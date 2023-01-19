@@ -98,7 +98,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         ],
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
-        requires_safety_checker: bool = True,
+        requires_safety_checker: bool = False,
     ):
         super().__init__()
 
@@ -421,6 +421,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
+        cross_attention_kwargs={},
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -527,7 +528,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # predict the noise residual
-                noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings,
+                    cross_attention_kwargs=cross_attention_kwargs).sample
 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -547,13 +549,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
         image = self.decode_latents(latents)
 
         # 9. Run safety checker
-        image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
+        # image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
 
         # 10. Convert to PIL
         if output_type == "pil":
             image = self.numpy_to_pil(image)
 
         if not return_dict:
-            return (image, has_nsfw_concept)
+            return (image, False)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=False)

@@ -27,6 +27,46 @@ else:
     xformers = None
 
 
+
+class ModulatedLayerNorm(nn.Module):
+    def __init__(self, features, context_dim_text, context_dim_prior, act=nn.Mish, mlp_ratio=2):
+        super().__init__()
+        self.mlp_t = nn.Sequential(
+            nn.Linear(context_dim_text, int(context_dim_text * mlp_ratio)),
+            act(),
+            nn.Linear(int(context_dim_text * mlp_ratio), features * 2)
+        )
+        self.mlp_p = nn.Sequential(
+            nn.Linear(context_dim_prior, int(context_dim_prior * mlp_ratio)),
+            act(),
+            nn.Linear(int(context_dim_prior * mlp_ratio), features * 2)
+        )
+
+    def forward(self, x, w_t, w_p):
+        shift_t, scale_t = self.mlp_t(w_t).chunk(2, 1)
+        result_t = x * (1 + scale_t) + shift_t
+        shift_p, scale_p = self.mlp_p(w_p).chunk(2, 1)
+        result_p = x * (1 + scale_p) + shift_p
+        return (result_t + result_p) / 2
+
+
+class ModulatedLayerNormWithGate(nn.Module):
+    def __init__(self, features, inner_module: nn.Module, act=nn.Mish, mlp_ratio=2):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(features, int(features*mlp_ratio)),
+            act(),
+            nn.Linear(int(features*mlp_ratio), features*3)
+        )
+        self.inner = inner_module
+    
+    def forward(self, x, w):
+        shift, scale, gate = self.mlp(w).chunk(3, 1)
+        x_ln = x * (1+scale) + shift
+        x_out = self.inner(x_ln)
+        return x_ln + (x_out * gate)
+
+
 class CrossAttention(nn.Module):
     r"""
     A cross attention layer.

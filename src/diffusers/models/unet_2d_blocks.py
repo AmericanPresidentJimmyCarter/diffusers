@@ -16,7 +16,7 @@ import torch
 from torch import nn
 
 from .attention import AttentionBlock
-from .cross_attention import CrossAttention, CrossAttnAddedKVProcessor
+from .cross_attention import ModulatedLayerNorm, CrossAttention, CrossAttnAddedKVProcessor
 from .dual_transformer_2d import DualTransformer2DModel
 from .resnet import Downsample2D, FirDownsample2D, FirUpsample2D, ResnetBlock2D, Upsample2D
 from .transformer_2d import Transformer2DModel
@@ -414,6 +414,8 @@ class UNetMidBlock2DCrossAttn(nn.Module):
         attn_num_head_channels=1,
         output_scale_factor=1.0,
         cross_attention_dim=1280,
+        modulated_ln_text_cond_dim=1024,
+        modulated_ln_prior_cond_dim=1024,
         dual_cross_attention=False,
         use_linear_projection=False,
         upcast_attention=False,
@@ -466,6 +468,12 @@ class UNetMidBlock2DCrossAttn(nn.Module):
                         norm_num_groups=resnet_groups,
                     )
                 )
+            attentions.append(ModulatedLayerNorm(
+                in_channels,
+                modulated_ln_text_cond_dim,
+                modulated_ln_prior_cond_dim,
+            ))
+            
             resnets.append(
                 ResnetBlock2D(
                     in_channels=in_channels,
@@ -514,6 +522,8 @@ class UNetMidBlock2DSimpleCrossAttn(nn.Module):
         attn_num_head_channels=1,
         output_scale_factor=1.0,
         cross_attention_dim=1280,
+        modulated_ln_text_cond_dim=1024,
+        modulated_ln_prior_cond_dim=1024,
     ):
         super().__init__()
 
@@ -555,6 +565,11 @@ class UNetMidBlock2DSimpleCrossAttn(nn.Module):
                     processor=CrossAttnAddedKVProcessor(),
                 )
             )
+            attentions.append(ModulatedLayerNorm(
+                in_channels,
+                modulated_ln_text_cond_dim,
+                modulated_ln_prior_cond_dim,
+            ))
             resnets.append(
                 ResnetBlock2D(
                     in_channels=in_channels,
@@ -687,6 +702,8 @@ class CrossAttnDownBlock2D(nn.Module):
         resnet_pre_norm: bool = True,
         attn_num_head_channels=1,
         cross_attention_dim=1280,
+        modulated_ln_text_cond_dim=1024,
+        modulated_ln_prior_cond_dim=1024,
         output_scale_factor=1.0,
         downsample_padding=1,
         add_downsample=True,
@@ -743,6 +760,11 @@ class CrossAttnDownBlock2D(nn.Module):
                         norm_num_groups=resnet_groups,
                     )
                 )
+            attentions.append(ModulatedLayerNorm(
+                in_channels,
+                modulated_ln_text_cond_dim,
+                modulated_ln_prior_cond_dim,
+            ))
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -1287,6 +1309,8 @@ class SimpleCrossAttnDownBlock2D(nn.Module):
         resnet_pre_norm: bool = True,
         attn_num_head_channels=1,
         cross_attention_dim=1280,
+        modulated_ln_text_cond_dim=1024,
+        modulated_ln_prior_cond_dim=1024,
         output_scale_factor=1.0,
         add_downsample=True,
     ):
@@ -1329,6 +1353,11 @@ class SimpleCrossAttnDownBlock2D(nn.Module):
                     processor=CrossAttnAddedKVProcessor(),
                 )
             )
+            attentions.append(ModulatedLayerNorm(
+                out_channels,
+                modulated_ln_text_cond_dim,
+                modulated_ln_prior_cond_dim,
+            ))
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -1475,6 +1504,8 @@ class CrossAttnUpBlock2D(nn.Module):
         resnet_pre_norm: bool = True,
         attn_num_head_channels=1,
         cross_attention_dim=1280,
+        modulated_ln_text_cond_dim=1024,
+        modulated_ln_prior_cond_dim=1024,
         output_scale_factor=1.0,
         add_upsample=True,
         dual_cross_attention=False,
@@ -1532,6 +1563,11 @@ class CrossAttnUpBlock2D(nn.Module):
                         norm_num_groups=resnet_groups,
                     )
                 )
+            attentions.append(ModulatedLayerNorm(
+                in_channels,
+                modulated_ln_text_cond_dim,
+                modulated_ln_prior_cond_dim,
+            ))
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -2096,6 +2132,8 @@ class SimpleCrossAttnUpBlock2D(nn.Module):
         resnet_pre_norm: bool = True,
         attn_num_head_channels=1,
         cross_attention_dim=1280,
+        modulated_ln_text_cond_dim=1024,
+        modulated_ln_prior_cond_dim=1024,
         output_scale_factor=1.0,
         add_upsample=True,
     ):
@@ -2139,6 +2177,11 @@ class SimpleCrossAttnUpBlock2D(nn.Module):
                     processor=CrossAttnAddedKVProcessor(),
                 )
             )
+            attentions.append(ModulatedLayerNorm(
+                out_channels,
+                modulated_ln_text_cond_dim,
+                modulated_ln_prior_cond_dim,
+            ))
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -2186,12 +2229,21 @@ class SimpleCrossAttnUpBlock2D(nn.Module):
             hidden_states = resnet(hidden_states, temb)
 
             # attn
-            hidden_states = attn(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                attention_mask=attention_mask,
-                **cross_attention_kwargs,
-            )
+            if isinstance(attn, ModulatedLayerNorm):
+                w_t = cross_attention_kwargs['layernorm_modulation_text']
+                w_p = cross_attention_kwargs['layernorm_modulation_prior']
+                hidden_states = attn(
+                    hidden_states,
+                    w_t,
+                    w_p,
+                )
+            else:
+                hidden_states = attn(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=attention_mask,
+                    **cross_attention_kwargs,
+                )
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
