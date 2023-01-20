@@ -31,7 +31,7 @@ class BatchResponse(BaseModel):
 
 class Arguments:
     small_batch_size = 16
-    batch_size = 18
+    batch_size = 16
     num_workers = 4
 
     # small_batch_size = 2

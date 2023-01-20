@@ -21,7 +21,7 @@ class FrozenT5Embedder(AbstractEncoder):
     ):  # others are google/t5-v1_1-xl and google/t5-v1_1-xxl
         super().__init__()
         self.tokenizer = T5Tokenizer.from_pretrained(version, cache_dir=cache_dir)
-        self.transformer = T5EncoderModel.from_pretrained(version, cache_dir=cache_dir)
+        self.transformer = T5EncoderModel.from_pretrained(version, cache_dir=cache_dir).half()
         self.device = device
         self.max_length = max_length # TODO: typical value?
         self.freeze()

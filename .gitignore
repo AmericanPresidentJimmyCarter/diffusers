@@ -142,6 +142,7 @@ runs
 /examples/**/*.args
 /examples/rag/sweep
 
+sd_prior_model_base
 # data
 /data
 serialization_dir

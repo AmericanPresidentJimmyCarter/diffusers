@@ -37,6 +37,23 @@ from .unet_2d_blocks import (
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+'''
+to copy in new weights
+>>> for k, v in old_model.items():                                              
+...   if k in new_model.state_dict().keys():                                    
+...     print('k is in new model', k)                                           
+...     new_model.state_dict()[k] = v 
+
+# Init mlp linears and bias with zeroes after
+
+mlp_keys = [k for k in new_model.keys() if 'mlp_t' in k or 'mlp_p' in k]
+for k in mlp_keys:
+    if 'bias' in k:
+        new_model[k] = torch.zeros_like(new_model[k])
+    if 'weights' in k:
+        new_model[k][0] = torch.zeros_like(new_model[k][0])
+        new_model[k][-1] = torch.zeros_like(new_model[k][-1])
+'''
 
 @dataclass
 class UNet2DConditionOutput(BaseOutput):
@@ -434,7 +451,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         # 3. down
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
-            if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
+            if hasattr(downsample_block, "has_cross_attention") and \
+                downsample_block.has_cross_attention:
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,

@@ -4,7 +4,7 @@ from dalle2_pytorch.train_configs import DiffusionPriorConfig, TrainDiffusionPri
 
 DEVICE = 'cuda:3'
 JSON_CONFIG_PATH = '/home/user/h-14-prior/prior_config.json'
-PRIOR_PATH = '/home/user/h-14-prior/h-14-prior-checkpoint-official/latest_model.pth'
+PRIOR_PATH = '/home/user/h-14-prior/latest_model.pth'
 
 # DEVICE = 'cuda'
 # JSON_CONFIG_PATH = '/home/user/storage/fsx/hlky/h-14-prior/h-14-prior-checkpoint-official/prior_config.json'
@@ -38,6 +38,8 @@ def load_prior_model():
     return _make_prior(prior_config)
 
 def image_embeddings_for_text(prior, captions):
-    tokens = tokenizer(captions).to(DEVICE)
-    output = prior.sample(tokens, num_samples_per_batch=2, timesteps=40)
+    output = None
+    with torch.cuda.amp.autocast():
+        tokens = tokenizer(captions).to(DEVICE)
+        output = prior.sample(tokens, num_samples_per_batch=2, timesteps=40)
     return output
