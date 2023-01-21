@@ -5,8 +5,9 @@ import io
 import logging
 import math
 import os
-import wandb
+import subprocess
 import random
+
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -16,12 +17,14 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import ujson
+import wandb
 
 import datasets
 import diffusers
 import transformers
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
+from accelerate.optimizer import move_to_device
 from accelerate.utils import set_seed
 from datasets import load_dataset
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, StableDiffusionPipeline, EulerDiscreteScheduler
@@ -55,9 +58,9 @@ def decode_latents(vae, latents):
     image = None
     with torch.no_grad():
         image = vae.decode(latents / 0.18215).sample
-        print('out', image.size())
+        # print('out', image.size())
     image = (image / 2 + 0.5).clamp(0, 1)
-    image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+    image = image.to(torch.float32).cpu().permute(0, 2, 3, 1).float().numpy()
     image = (image * 255).round().astype("uint8")
     return image
 
@@ -239,7 +242,7 @@ def parse_args():
     parser.add_argument(
         "--loop_training_steps",
         type=int,
-        default=None,
+        default=25,
         help=(
             "Number of training steps to loop per sample."
         ),
@@ -260,10 +263,6 @@ def parse_args():
             "How many comparison samples to ship to wandb."
         ),
     )
-    
-    parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
-    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -271,8 +270,8 @@ def parse_args():
         args.local_rank = env_local_rank
 
     # Sanity checks
-    if args.dataset_name is None and args.train_data_dir is None:
-        raise ValueError("Need either a dataset name or a training folder.")
+    # if args.dataset_name is None and args.train_data_dir is None:
+    #     raise ValueError("Need either a dataset name or a training folder.")
 
     # default to using the same revision for the non-ema model if not specified
     if args.non_ema_revision is None:
@@ -289,11 +288,6 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
         return f"{username}/{model_id}"
     else:
         return f"{organization}/{model_id}"
-
-
-dataset_name_mapping = {
-    "lambdalabs/pokemon-blip-captions": ("image", "text"),
-}
 
 
 # Adapted from torch-ema https://github.com/fadel/pytorch_ema/blob/master/torch_ema/ema.py#L14
@@ -409,10 +403,12 @@ def main():
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         logging_dir=logging_dir,
+        kwargs_handlers=[ddp_kwargs],
     )
 
     if accelerator.is_main_process:
@@ -473,6 +469,13 @@ def main():
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
     )
 
+    # Freeze everything but MLP layers
+    for name, param in unet.named_parameters():
+        if 'mlp_t' in name or 'mlp_p' in name:
+            param.requires_grad_(True)
+        else:
+            param.requires_grad_(False)
+
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -484,11 +487,7 @@ def main():
         )
         ema_unet = EMAModel(ema_unet.parameters())
 
-    if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
+    unet.enable_xformers_memory_efficient_attention()
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -500,7 +499,7 @@ def main():
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            args.learning_rate * args.gradient_accumulation_steps * args.batch_size * accelerator.num_processes
         )
 
     # Initialize the optimizer
@@ -523,11 +522,9 @@ def main():
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
+    # move_to_device(optimizer.state_dict(), 'cpu')
 
-    # Get the datasets: you can either provide your own training and evaluation files (see below)
-    # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-    def tokenize_captions(captions, is_train=True):
-        captions = []
+    def tokenize_captions(captions):
         inputs = tokenizer(
             captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
         )
@@ -560,6 +557,7 @@ def main():
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
+    text_encoder.to(accelerator.device, dtype=weight_dtype)
     if args.use_ema:
         ema_unet.to(accelerator.device)
 
@@ -573,6 +571,9 @@ def main():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     global_step = 0
     first_epoch = 0
+
+    # if accelerator.is_last_process:
+    #     args.batch_size = args.batch_size // 4
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
@@ -625,7 +626,6 @@ def main():
             'prior_flat_uncond' not in resp_dict or resp_dict['prior_flat_uncond'] is None:
             continue
 
-
         images = b64_string_to_tensor(resp_dict['images'], 'cpu')
         if images is None:
             continue
@@ -634,17 +634,17 @@ def main():
         captions = resp_dict['captions'] * 2
         captions = captions[0:args.batch_size]
 
-        text_embeddings = b64_string_to_tensor(resp_dict['conditioning_full'],
+        text_embeddings = b64_string_to_tensor(resp_dict['conditioning_flat'],
             'cpu')
         if text_embeddings is None:
             continue
-        text_embeddings = text_embeddings.tile((2,1,1))[0:args.batch_size].to(accelerator.device)
+        text_embeddings = text_embeddings.tile((2,1))[0:args.batch_size].to(accelerator.device)
 
-        text_embeddings_uncond = b64_string_to_tensor(resp_dict['unconditioning_full'],
+        text_embeddings_uncond = b64_string_to_tensor(resp_dict['unconditioning_flat'],
             'cpu')
         if text_embeddings_uncond is None:
             continue
-        text_embeddings_uncond = text_embeddings_uncond.tile((2,1,1))[0:args.batch_size].to(accelerator.device)
+        text_embeddings_uncond = text_embeddings_uncond.tile((2,1))[0:args.batch_size].to(accelerator.device)
 
         if text_embeddings is None or text_embeddings_uncond is None:
             continue
@@ -654,7 +654,7 @@ def main():
             continue
         prior_flat = prior_flat.tile((2,1))[0:args.batch_size].to(accelerator.device)
 
-        if prior_flat is None or prior_flat is None:
+        if prior_flat is None:
             continue
 
         prior_flat_uncond = b64_string_to_tensor(resp_dict['prior_flat_uncond'],
@@ -663,55 +663,81 @@ def main():
             continue
         prior_flat_uncond = prior_flat_uncond.tile((2,1))[0:args.batch_size].to(accelerator.device)
 
-        if prior_flat_uncond is None or prior_flat_uncond is None:
+        if prior_flat_uncond is None:
             continue
 
         # Don't adjust accumulation steps
         # with accelerator.accumulate(unet):
 
         # Convert images to latent space
-        latents = vae.encode(images).latent_dist.sample() *  0.18215
+        latents = vae.encode(images.to(weight_dtype)).latent_dist.sample() *  0.18215
         # latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
         # latents = latents * 0.18215
 
+        # Get the text embedding for conditioning
+        batch = tokenize_captions(captions)
+        encoder_hidden_states = text_encoder(batch.to(latents.device))[0]
+        text_encoder.to('cpu')
+
         # Sample noise that we'll add to the latents
-        for nts in range(args.loop_training_steps):
-            noise = torch.randn_like(latents)
-            bsz = latents.shape[0]
-            # Sample a random timestep for each image
-            timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
-            timesteps = timesteps.long()
+        with torch.amp.autocast(device_type='cuda', dtype=weight_dtype):
+            # counter = 0
+            for nts in range(args.loop_training_steps):
+                # print('loop counter', counter)
+                # counter += 1
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = timesteps.long()
 
-            # Add noise to the latents according to the noise magnitude at each timestep
-            # (this is the forward diffusion process)
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-            # Get the text embedding for conditioning
-            batch = tokenize_captions(captions)
-            encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                # Get the target for loss depending on the prediction type
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-            # Get the target for loss depending on the prediction type
-            if noise_scheduler.config.prediction_type == "epsilon":
-                target = noise
-            elif noise_scheduler.config.prediction_type == "v_prediction":
-                target = noise_scheduler.get_velocity(latents, noise, timesteps)
-            else:
-                raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                # Predict the noise residual and compute loss
+                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states,
+                    cross_attention_kwargs={
+                        'layernorm_modulation_text': text_embeddings,
+                        'layernorm_modulation_prior': prior_flat,
+                    }).sample
+                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-            # Predict the noise residual and compute loss
-            model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                # Gather the losses across all processes for logging (if we use distributed training).
+                avg_loss = accelerator.gather(loss.repeat(args.batch_size)).mean()
+                train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
-            # Gather the losses across all processes for logging (if we use distributed training).
-            avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-            train_loss += avg_loss.item() / args.gradient_accumulation_steps
+                # Backpropagate
+                accelerator.backward(loss, retain_graph=nts != args.loop_training_steps - 1)
+                grad_norm = accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
 
-            # Backpropagate
-            accelerator.backward(loss, retain_graph=nts != args.loop_training_steps - 1)
-            accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                if nts != args.loop_training_steps - 1:
+                    del loss, timesteps, noise, noisy_latents, model_pred
+                else:
+                    del timesteps, noise, noisy_latents, model_pred
+
+        if accelerator.is_main_process:
+            log = {
+                "loss": avg_loss.item(),
+                "curr_loss": loss.item(),
+                "train_loss": train_loss,
+                "grad_norm": grad_norm,
+                "lr": optimizer.param_groups[0]["lr"],
+            }
+            wandb.log(log)
+
+        text_encoder.to(accelerator.device)
 
         # Checks if the accelerator has performed an optimization step behind the scenes
         if args.use_ema:
@@ -721,68 +747,112 @@ def main():
         accelerator.log({"train_loss": train_loss}, step=global_step)
         train_loss = 0.0
 
-        # All of this is only done on the main process
-        if global_step % args.log_period == 0 and accelerator.is_main_process:
-            samples = None
-            unet.eval()
-            with torch.no_grad():
-                images = images[: args.comparison_samples]
-                image_latents = latents[: args.comparison_samples]
-                captions = captions[: args.comparison_samples]
-                text_embeddings = text_embeddings[: args.comparison_samples]
-                text_embeddings_uncond = text_embeddings_uncond[: args.comparison_samples]
-                prior_flat = prior_flat[: args.comparison_samples]
-                prior_flat_uncond = prior_flat_uncond[: args.comparison_samples]
+        # # All of this is only done on the main process
+        # if ((global_step == 1) or (global_step % args.log_period == 0)) and accelerator.is_main_process:
+        #     samples = None
+        #     unet.eval()
+        #     with torch.no_grad():
+        #         with torch.amp.autocast(device_type='cuda', dtype=weight_dtype):
+        #             images = images[: args.comparison_samples]
+        #             image_latents = latents[: args.comparison_samples]
+        #             captions = captions[: args.comparison_samples]
+        #             text_embeddings = text_embeddings[: args.comparison_samples]
+        #             text_embeddings_uncond = text_embeddings_uncond[: args.comparison_samples]
+        #             prior_flat = prior_flat[: args.comparison_samples]
+        #             prior_flat_uncond = prior_flat_uncond[: args.comparison_samples]
 
-                model = maybe_unwrap_model(unet)
-                scheduler =  EulerDiscreteScheduler.from_config(
-                    model.scheduler.config)
-                pipeline = StableDiffusionPipeline(vae, text_encoder, tokenizer,
-                    model, scheduler)
-                torch_g = torch.Generator(device='cuda')
-                samples_unflat = []
-                for i_c, caption in enumerate(captions):
-                    torch_g.manual_seed(12345)
-                    s_u, _ = model(caption, num_inference_steps=30, generator=torch_g,
-                        return_dict=False,
-                        cross_attention_kwargs={
-                            'layernorm_modulation_text': torch.stack([
-                                text_embeddings[i_c],
-                                text_embeddings_uncond[i_c],
-                            ], dim=0),
-                            'layernorm_modulation_prior': torch.stack([
-                                prior_flat[i_c],
-                                prior_flat_uncond[i_c],
-                            ], dim=0),
-                        })
-                    samples_unflat.append(s_u)
-                samples = torch.cat(samples_unflat, dim=0)
-                
-                # print('samples')
+        #             pipeline_temp = StableDiffusionPipeline.from_pretrained(
+        #                 'sd_prior_model_base', torch_dtype=weight_dtype)
+        #             model_unwrapped = maybe_unwrap_model(unet)
+        #             scheduler = EulerDiscreteScheduler.from_config(
+        #                 pipeline_temp.scheduler.config)
+        #             del pipeline_temp
+        #             pipeline = StableDiffusionPipeline(vae, text_encoder, tokenizer,
+        #                 model_unwrapped, scheduler, None, None)
+        #             torch_g = torch.Generator(device=accelerator.device)
+        #             samples = []
+        #             for i_c, caption in enumerate(captions):
+        #                 torch_g.manual_seed(12345)
+        #                 latents_d = pipeline(caption, num_inference_steps=30, generator=torch_g,
+        #                     return_dict=False,
+        #                     cross_attention_kwargs={
+        #                         'layernorm_modulation_text': torch.stack([
+        #                             text_embeddings[i_c],
+        #                             text_embeddings_uncond[i_c],
+        #                         ], dim=0),
+        #                         'layernorm_modulation_prior': torch.stack([
+        #                             prior_flat[i_c],
+        #                             prior_flat_uncond[i_c],
+        #                         ], dim=0),
+        #                     },
+        #                     skip_decode_latents=True)
+        #                 model_unwrapped.to('cpu')
+        #                 text_encoder.to('cpu')
+        #                 s_u = decode_latents(vae, latents_d)
+        #                 model_unwrapped.to(accelerator.device)
+        #                 text_encoder.to(accelerator.device)
+        #                 del latents_d
+        #                 samples.append(s_u)
+                    
+        #             # print('samples')
 
-                # recon_images = vae.decode(samples / 0.18215).sample
-                # print('samples', samples.size())
-                del scheduler, torch_g, pipeline
-                recon_images = decode_latents(vae, image_latents)
+        #             # recon_images = vae.decode(samples / 0.18215).sample
+        #             # print('samples', samples.size())
+        #             del scheduler, torch_g, pipeline
+        #             recon_images = decode_latents(vae, image_latents)
+        #             print('got recon')
 
-                # log_images = samples
+        #         # log_images = samples
 
-            # if accelerator.is_main_process:
-            #     accelerator.save_state(f"models/{args.run_name}/")
+        #         # if accelerator.is_main_process:
+        #         #     accelerator.save_state(f"models/{args.run_name}/")
 
-            unet.train()
+        #     unet.train()
+        #     print('train')
+
+        #     log_data = [
+        #         [captions[i]]
+        #         + [wandb.Image(samples[i])]
+        #         + [wandb.Image(images[i])]
+        #         + [wandb.Image(recon_images[i])]
+        #         for i in range(len(captions))
+        #     ]
+        #     log_table = wandb.Table(
+        #         data=log_data, columns=["Caption", "Image", "Orig", "Recon"]
+        #     )
+        #     wandb.log({"Log": log_table})
+        #     print('log')
+
+        if ((global_step == 1) or (global_step % args.log_period == 0)) and accelerator.is_main_process:
+            # Save model
+            unet_unwrapped = accelerator.unwrap_model(unet)
+            if args.use_ema:
+                ema_unet.copy_to(unet.parameters())
+
+            pipeline = StableDiffusionPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                text_encoder=text_encoder,
+                vae=vae,
+                unet=unet_unwrapped,
+                revision=args.revision,
+            )
+            pipeline.save_pretrained(args.output_dir)
+
+            # subprocess.run(["python", "sample.py"])
+            os.system("export CUDA_VISIBLE_DEVICES=\"0,1,2,3\" && . /home/user/Programs/xformers/env/bin/activate && python sample.py")
+            os.system("export CUDA_VISIBLE_DEVICES=\"0,1,2\"")
+            samples = torch.load('sample.pt')
 
             log_data = [
-                [captions[i]]
-                + [wandb.Image(samples[i])]
-                + [wandb.Image(images[i])]
-                + [wandb.Image(recon_images[i])]
-                for i in range(len(captions))
+                [wandb.Image(samples[i])]
+                for i in range(samples.size()[0])
             ]
             log_table = wandb.Table(
-                data=log_data, columns=["Caption", "Image", "Orig", "Recon"]
+                data=log_data, columns=["Samples"]
             )
             wandb.log({"Log": log_table})
+
+            del pipeline, samples
 
         if global_step % args.checkpointing_steps == 0:
             if accelerator.is_main_process:

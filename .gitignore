@@ -143,6 +143,7 @@ runs
 /examples/rag/sweep
 
 sd_prior_model_base
+sd_prior_model_trained
 # data
 /data
 serialization_dir

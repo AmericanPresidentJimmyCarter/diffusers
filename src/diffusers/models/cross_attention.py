@@ -43,11 +43,15 @@ class ModulatedLayerNorm(nn.Module):
         )
 
     def forward(self, x, w_t, w_p):
-        shift_t, scale_t = self.mlp_t(w_t).chunk(2, 1)
+        # print('modulated layernorm get', x.shape, w_t.shape, w_p.shape)
+        x = x.permute(2, 3, 0, 1)
+        shift_t, scale_t = self.mlp_t(w_t).chunk(2, dim=1)
         result_t = x * (1 + scale_t) + shift_t
-        shift_p, scale_p = self.mlp_p(w_p).chunk(2, 1)
+        shift_p, scale_p = self.mlp_p(w_p).chunk(2, dim=1)
         result_p = x * (1 + scale_p) + shift_p
-        return (result_t + result_p) / 2
+        x_result = (result_t + result_p) / 2
+        # print('modulated layernorm after', x_result.permute(2, 3, 0, 1).shape, w_t.shape, w_p.shape)
+        return x_result.permute(2, 3, 0, 1)
 
 
 class ModulatedLayerNormWithGate(nn.Module):
@@ -252,7 +256,7 @@ class CrossAttention(nn.Module):
 
 
 class CrossAttnProcessor:
-    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None):
+    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None, **kwargs):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
 
@@ -320,7 +324,7 @@ class CrossAttnAddedKVProcessor:
 
 
 class XFormersCrossAttnProcessor:
-    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None):
+    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None, **kwargs):
         batch_size, sequence_length, _ = hidden_states.shape
 
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)

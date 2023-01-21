@@ -422,6 +422,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs={},
+        skip_decode_latents=False,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -544,6 +545,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
+
+        if skip_decode_latents:
+            return latents
 
         # 8. Post-processing
         image = self.decode_latents(latents)

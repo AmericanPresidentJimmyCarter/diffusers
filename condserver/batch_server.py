@@ -11,7 +11,7 @@ import torch
 from pydantic import BaseModel
 
 
-from data import tensor_to_b64_string, get_dataloader
+from data import tensor_to_b64_string, get_dataloader_laion_coco
 
 
 class BatchRequest(BaseModel):
@@ -30,20 +30,20 @@ class BatchResponse(BaseModel):
 
 
 class Arguments:
-    small_batch_size = 16
-    batch_size = 16
+    small_batch_size = 1
+    batch_size = 4
     num_workers = 4
 
     # small_batch_size = 2
     # batch_size = 2
     # num_workers = 1
-    # dataset_path = "laion/laion-coco"
-    dataset_path = 'gigant/oldbookillustrations_2'
-    cache_dir = '/scratch/hfcache'
-    # cache_dir = "/home/user/.cache"  # cache_dir for models
+    dataset_path = "laion/laion-coco"
+    # dataset_path = 'gigant/oldbookillustrations_2'
+    # cache_dir = '/scratch/hfcache'
+    cache_dir = "/home/user/.cache"  # cache_dir for models
 
 
-dataset = get_dataloader(Arguments())
+dataset = get_dataloader_laion_coco(Arguments())
 
 
 batch_iterator = iter(dataset)
@@ -78,6 +78,12 @@ def batch(req: BatchRequest) -> Response:
         #     unconditioning_flat=tensor_to_b64_string(flat_uncond),
         #     unconditioning_full=tensor_to_b64_string(full_uncond),
         # )
+        assert flat is not None
+        assert full is not None
+        assert flat_uncond is not None
+        assert full_uncond is not None
+        assert prior_flat is not None
+        assert prior_flat_uncond is not None
         print(f'Distributing new batch, size {len(images)}')
         resp = {
             'captions': captions,

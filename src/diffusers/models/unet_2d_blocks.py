@@ -761,7 +761,7 @@ class CrossAttnDownBlock2D(nn.Module):
                     )
                 )
             attentions.append(ModulatedLayerNorm(
-                in_channels,
+                out_channels,
                 modulated_ln_text_cond_dim,
                 modulated_ln_prior_cond_dim,
             ))
@@ -787,7 +787,9 @@ class CrossAttnDownBlock2D(nn.Module):
         # TODO(Patrick, William) - attention mask is not used
         output_states = ()
 
+        counter = 0
         for resnet, attn in zip(self.resnets, self.attentions):
+            counter += 1
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
@@ -808,19 +810,30 @@ class CrossAttnDownBlock2D(nn.Module):
                 )[0]
             else:
                 hidden_states = resnet(hidden_states, temb)
-                hidden_states = attn(
-                    hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                ).sample
+                if isinstance(attn, ModulatedLayerNorm):
+                    w_t = cross_attention_kwargs['layernorm_modulation_text']
+                    w_p = cross_attention_kwargs['layernorm_modulation_prior']
+                    hidden_states = attn(
+                        hidden_states,
+                        w_t,
+                        w_p,
+                    )
+                else:
+                    hidden_states = attn(
+                        hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                    ).sample
 
             output_states += (hidden_states,)
+            # print('resnet and attn', hidden_states.size(), counter)
 
         if self.downsamplers is not None:
             for downsampler in self.downsamplers:
                 hidden_states = downsampler(hidden_states)
 
             output_states += (hidden_states,)
+            
 
         return hidden_states, output_states
 
@@ -1564,7 +1577,7 @@ class CrossAttnUpBlock2D(nn.Module):
                     )
                 )
             attentions.append(ModulatedLayerNorm(
-                in_channels,
+                out_channels,
                 modulated_ln_text_cond_dim,
                 modulated_ln_prior_cond_dim,
             ))
@@ -1615,11 +1628,20 @@ class CrossAttnUpBlock2D(nn.Module):
                 )[0]
             else:
                 hidden_states = resnet(hidden_states, temb)
-                hidden_states = attn(
-                    hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                ).sample
+                if isinstance(attn, ModulatedLayerNorm):
+                    w_t = cross_attention_kwargs['layernorm_modulation_text']
+                    w_p = cross_attention_kwargs['layernorm_modulation_prior']
+                    hidden_states = attn(
+                        hidden_states,
+                        w_t,
+                        w_p,
+                    )
+                else:
+                    hidden_states = attn(
+                        hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                    ).sample
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:

@@ -59,15 +59,18 @@ t5_model = spawn_t5_model()
 # prior_model = spawn_prior_model()
 prior = load_prior_model()
 
+app = FastAPI()
+
+
 def captions_to_prior_tensors(_prior, captions):
     prior_flat = None
     prior_flat_uncond = None
     with mtx_prior:
         prior_flat = image_embeddings_for_text(_prior, captions)
-        prior_flat_uncond = image_embeddings_for_text(_prior, [''] * len(captions))
+        # This is simply too slow.
+        # prior_flat_uncond = _prior_model([''] * len(captions))
+        prior_flat_uncond = torch.randn_like(prior_flat)
     return (prior_flat, prior_flat_uncond)
-
-app = FastAPI()
 
 
 def captions_to_conditioning_tensors(_t5_model, captions):
@@ -118,17 +121,17 @@ def captions_to_prior_tensors_thread_safe(prior_model, captions):
     return (prior_flat, prior_flat_uncond)
 
 
-def captions_to_prior_tensors(_prior_model, captions):
-    prior_flat = None
-    prior_flat_uncond = None
-    with mtx_prior:
-        prior_flat = _prior_model(captions)
-        # This is simply too slow.
-        # prior_flat_uncond = _prior_model([''] * len(captions))
-        prior_flat_uncond = torch.randn_like(prior_flat)
-    assert prior_flat.size() == (len(captions), 768)
-    assert prior_flat_uncond.size() == (len(captions), 768)
-    return (prior_flat, prior_flat_uncond)
+# def captions_to_prior_tensors(_prior_model, captions):
+#     prior_flat = None
+#     prior_flat_uncond = None
+#     with mtx_prior:
+#         prior_flat = _prior_model(captions)
+#         # This is simply too slow.
+#         # prior_flat_uncond = _prior_model([''] * len(captions))
+#         prior_flat_uncond = torch.randn_like(prior_flat)
+#     assert prior_flat.size() == (len(captions), 768)
+#     assert prior_flat_uncond.size() == (len(captions), 768)
+#     return (prior_flat, prior_flat_uncond)
 
 
 @app.post("/conditionings")
@@ -148,7 +151,13 @@ def conditionings(req: ConditioningRequest) -> Response:
                 captions_to_conditioning_tensors(t5_model,
                     req.captions)
         prior_flat, prior_flat_uncond = \
-            captions_to_prior_tensors(prior_model, req.captions)
+            captions_to_prior_tensors(prior, req.captions)
+        assert flat is not None
+        assert full is not None
+        assert flat_uncond is not None
+        assert full_uncond is not None
+        assert prior_flat is not None
+        assert prior_flat_uncond is not None
         # resp = ConditioningResponse(
         #     flat=tensor_to_b64_string(flat),
         #     full=tensor_to_b64_string(full),

@@ -38,21 +38,25 @@ from .unet_2d_blocks import (
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 '''
-to copy in new weights
->>> for k, v in old_model.items():                                              
-...   if k in new_model.state_dict().keys():                                    
-...     print('k is in new model', k)                                           
-...     new_model.state_dict()[k] = v 
+# to copy in new weights
+new_model = UNet2DConditionModel.from_config('sd_prior_model_base/unet/config.json')
+for k, v in old_model.items():                                              
+  if k in new_model.state_dict().keys():                                    
+    print('k is in new model', k)                                           
+    new_model.state_dict()[k] = v 
 
 # Init mlp linears and bias with zeroes after
 
-mlp_keys = [k for k in new_model.keys() if 'mlp_t' in k or 'mlp_p' in k]
+mlp_keys = [k for k in new_model.state_dict().keys() if 'mlp_t' in k or 'mlp_p' in k]
 for k in mlp_keys:
     if 'bias' in k:
-        new_model[k] = torch.zeros_like(new_model[k])
+        new_model.state_dict()[k] = torch.zeros_like(new_model.state_dict()[k])
     if 'weights' in k:
-        new_model[k][0] = torch.zeros_like(new_model[k][0])
-        new_model[k][-1] = torch.zeros_like(new_model[k][-1])
+        new_model.state_dict()[k][0] = torch.zeros_like(new_model.state_dict()[k][0])
+        new_model.state_dict()[k][-1] = torch.zeros_like(new_model.state_dict()[k][-1])
+
+for name, param in new_model.named_parameters():
+    ...
 '''
 
 @dataclass
