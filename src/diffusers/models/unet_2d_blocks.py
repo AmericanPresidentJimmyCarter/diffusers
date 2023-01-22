@@ -1574,6 +1574,7 @@ class CrossAttnUpBlock2D(nn.Module):
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
+            print('hidden_states_cat', hash_tensor(hidden_states))
 
             if self.training and self.gradient_checkpointing:
 
