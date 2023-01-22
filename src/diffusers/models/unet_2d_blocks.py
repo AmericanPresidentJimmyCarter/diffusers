@@ -1598,11 +1598,13 @@ class CrossAttnUpBlock2D(nn.Module):
                 )[0]
             else:
                 hidden_states = resnet(hidden_states, temb)
+                print('output of resnet', hash_tensor(hidden_states))
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
                 ).sample
+                print('output of attn step', hash_tensor(hidden_states))
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
