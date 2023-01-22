@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
+import io
+
 import numpy as np
 import torch
 from torch import nn
@@ -20,6 +23,15 @@ from .cross_attention import CrossAttention, CrossAttnAddedKVProcessor
 from .dual_transformer_2d import DualTransformer2DModel
 from .resnet import Downsample2D, FirDownsample2D, FirUpsample2D, ResnetBlock2D, Upsample2D
 from .transformer_2d import Transformer2DModel
+
+
+def hash_tensor(t: torch.Tensor) -> str:
+    buff = io.BytesIO()
+    torch.save(t, buff)
+    buff.seek(0)
+    m = hashlib.md5()
+    m.update(buff.read())
+    return m.hexdigest()
 
 
 def get_down_block(
@@ -487,6 +499,7 @@ class UNetMidBlock2DCrossAttn(nn.Module):
     def forward(
         self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
     ):
+        print('UNetMidBlock2DCrossAttn start', hash_tensor(hidden_states))
         hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             hidden_states = attn(
@@ -495,7 +508,7 @@ class UNetMidBlock2DCrossAttn(nn.Module):
                 cross_attention_kwargs=cross_attention_kwargs,
             ).sample
             hidden_states = resnet(hidden_states, temb)
-
+        print('UNetMidBlock2DCrossAttn after', hash_tensor(hidden_states))
         return hidden_states
 
 
@@ -763,6 +776,7 @@ class CrossAttnDownBlock2D(nn.Module):
         self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
     ):
         # TODO(Patrick, William) - attention mask is not used
+        print('CrossAttnDownBlock2D start', hash_tensor(hidden_states))
         output_states = ()
 
         for resnet, attn in zip(self.resnets, self.attentions):
@@ -800,6 +814,7 @@ class CrossAttnDownBlock2D(nn.Module):
 
             output_states += (hidden_states,)
 
+        print('CrossAttnDownBlock2D end', hash_tensor(hidden_states))
         return hidden_states, output_states
 
 
@@ -1553,6 +1568,7 @@ class CrossAttnUpBlock2D(nn.Module):
         attention_mask=None,
     ):
         # TODO(Patrick, William) - attention mask is not used
+        print('CrossAttnUpBlock2D start', hash_tensor(hidden_states))
         for resnet, attn in zip(self.resnets, self.attentions):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
@@ -1589,6 +1605,7 @@ class CrossAttnUpBlock2D(nn.Module):
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size)
 
+        print('CrossAttnUpBlock2D end', hash_tensor(hidden_states))
         return hidden_states
 
 
