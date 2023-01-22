@@ -19,8 +19,8 @@ model = model.to('cuda')
 
 prompt = "pikachu surfing a giant wave eating an ice cream cone"
 
-# import debugpy
-# debugpy.listen(('0.0.0.0', 12345))
-# debugpy.wait_for_client()
+import debugpy
+debugpy.listen(('0.0.0.0', 12345))
+debugpy.wait_for_client()
 output_image = model(prompt, num_inference_steps=30, generator=torch_g, height=512, width=512).images[0]
 output_image.save('out.png')
