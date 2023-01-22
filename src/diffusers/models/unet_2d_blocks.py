@@ -1572,9 +1572,11 @@ class CrossAttnUpBlock2D(nn.Module):
         for resnet, attn in zip(self.resnets, self.attentions):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
+            print('res_hidden_states', hash_tensor(res_hidden_states), res_hidden_states.shape)
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
+            print('res_hidden_states_tuple', hash_tensor(res_hidden_states_tuple), len(res_hidden_states_tuple))
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
-            print('hidden_states_cat', hash_tensor(hidden_states))
+            print('hidden_states_cat', hash_tensor(hidden_states), hidden_states.shape)
 
             if self.training and self.gradient_checkpointing:
 
